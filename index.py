@@ -291,41 +291,59 @@ async def handle_proxy(request: web_request.Request):
         return web.json_response({'ok': False, 'error': 'Missing "url" parameter'}, status=400)
 
     try:
-        async with aiohttp.ClientSession() as session:
+        # لا نستخدم 'async with' للـ session حتى نتمكن من بث الـ response
+        session = aiohttp.ClientSession()
+        try:
             # مرّر Range header إذا موجود (لدعم seek)
             headers = {'User-Agent': UA}
             range_header = request.headers.get('Range')
             if range_header:
                 headers['Range'] = range_header
 
-            async with session.get(target_url, headers=headers, timeout=aiohttp.ClientTimeout(total=300)) as upstream:
-                if upstream.status != 200 and upstream.status != 206:
-                    body = await upstream.text()
-                    return web.json_response(
-                        {'ok': False, 'error': f'Upstream returned {upstream.status}', 'body': body[:200]},
-                        status=502,
-                        headers={'Access-Control-Allow-Origin': '*'}
-                    )
+            upstream = await session.get(target_url, headers=headers, timeout=aiohttp.ClientTimeout(total=300))
 
-                # مرّر الـ headers المهمة
-                resp_headers = {
-                    'Access-Control-Allow-Origin': '*',
-                    'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-                    'Access-Control-Allow-Headers': 'Range',
-                    'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Content-Type',
-                    'Cache-Control': 'public, max-age=86400',
-                }
-                for h in ['content-type', 'content-length', 'content-range', 'accept-ranges']:
-                    v = upstream.headers.get(h)
-                    if v:
-                        resp_headers[h] = v
-
-                # ابث الـ body
-                return web.Response(
-                    status=upstream.status,
-                    headers=resp_headers,
-                    body=upstream.body
+            if upstream.status != 200 and upstream.status != 206:
+                body = await upstream.text()
+                await upstream.release()
+                await session.close()
+                return web.json_response(
+                    {'ok': False, 'error': f'Upstream returned {upstream.status}', 'body': body[:200]},
+                    status=502,
+                    headers={'Access-Control-Allow-Origin': '*'}
                 )
+
+            # مرّر الـ headers المهمة
+            resp_headers = {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+                'Access-Control-Allow-Headers': 'Range',
+                'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Content-Type',
+                'Cache-Control': 'public, max-age=86400',
+            }
+            for h in ['content-type', 'content-length', 'content-range', 'accept-ranges']:
+                v = upstream.headers.get(h)
+                if v:
+                    resp_headers[h] = v
+
+            # استخدم StreamResponse لبث الـ body chunk-by-chunk
+            stream_response = web.StreamResponse(
+                status=upstream.status,
+                headers=resp_headers
+            )
+            await stream_response.prepare(request)
+
+            # اقرأ الـ upstream chunk-by-chunk وابثه
+            async for chunk in upstream.content.iter_chunked(64 * 1024):  # 64KB chunks
+                await stream_response.write(chunk)
+
+            await stream_response.write_eof()
+            await upstream.release()
+            await session.close()
+            return stream_response
+
+        except Exception as e:
+            await session.close()
+            raise e
     except Exception as e:
         return web.json_response(
             {'ok': False, 'error': str(e)},

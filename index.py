@@ -276,10 +276,69 @@ async def handle_options(request):
     })
 
 
+async def handle_proxy(request: web_request.Request):
+    """
+    GET /proxy?url={mp4_url}
+
+    يبث ملف MP4 من premilkyway.com عبر Fly.io.
+    ضروري لأن premilkyway.com يربط الـ token بالـ IP:
+    - الـ token وُلّد على Fly.io → يعمل فقط من Fly.io IP
+    - هذا الـ proxy يجلب الـ MP4 من Fly.io ويعيد بثه للمتصفح
+    """
+    import aiohttp
+    target_url = request.query.get('url')
+    if not target_url:
+        return web.json_response({'ok': False, 'error': 'Missing "url" parameter'}, status=400)
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # مرّر Range header إذا موجود (لدعم seek)
+            headers = {'User-Agent': UA}
+            range_header = request.headers.get('Range')
+            if range_header:
+                headers['Range'] = range_header
+
+            async with session.get(target_url, headers=headers, timeout=aiohttp.ClientTimeout(total=300)) as upstream:
+                if upstream.status != 200 and upstream.status != 206:
+                    body = await upstream.text()
+                    return web.json_response(
+                        {'ok': False, 'error': f'Upstream returned {upstream.status}', 'body': body[:200]},
+                        status=502,
+                        headers={'Access-Control-Allow-Origin': '*'}
+                    )
+
+                # مرّر الـ headers المهمة
+                resp_headers = {
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+                    'Access-Control-Allow-Headers': 'Range',
+                    'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Content-Type',
+                    'Cache-Control': 'public, max-age=86400',
+                }
+                for h in ['content-type', 'content-length', 'content-range', 'accept-ranges']:
+                    v = upstream.headers.get(h)
+                    if v:
+                        resp_headers[h] = v
+
+                # ابث الـ body
+                return web.Response(
+                    status=upstream.status,
+                    headers=resp_headers,
+                    body=upstream.body
+                )
+    except Exception as e:
+        return web.json_response(
+            {'ok': False, 'error': str(e)},
+            status=502,
+            headers={'Access-Control-Allow-Origin': '*'}
+        )
+
+
 def main():
     app = web.Application()
     app.router.add_post('/extract', handle_extract)
     app.router.add_get('/qualities', handle_qualities)
+    app.router.add_get('/proxy', handle_proxy)
     app.router.add_get('/health', handle_health)
     app.router.add_route('OPTIONS', '/{tail:.*}', handle_options)
     print(f'MP4 extractor listening on :{PORT}')

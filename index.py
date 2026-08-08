@@ -307,6 +307,20 @@ async def handle_proxy(request: web_request.Request):
         try:
             # مرّر Range header إذا موجود (لدعم seek)
             headers = {'User-Agent': UA}
+
+            # أضف Referer/Origin تلقائياً حسب الـ CDN
+            if 'hakunaymatata.com' in target_url or 'bcdnxw' in target_url:
+                headers['Referer'] = 'https://videodownloader.site/'
+                headers['Origin'] = 'https://videodownloader.site'
+            elif 'premilkyway.com' in target_url or 'cdn-centaurus.com' in target_url:
+                headers['Referer'] = 'https://audinifer.com/'
+                headers['Origin'] = 'https://audinifer.com'
+
+            # اسمح بتمرير Referer مخصص عبر query param
+            custom_ref = request.query.get('ref')
+            if custom_ref:
+                headers['Referer'] = custom_ref
+
             range_header = request.headers.get('Range')
             if range_header:
                 headers['Range'] = range_header

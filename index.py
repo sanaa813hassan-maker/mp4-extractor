@@ -352,9 +352,120 @@ async def handle_proxy(request: web_request.Request):
         )
 
 
+async def handle_extract_all(request: web_request.Request):
+    """
+    POST /extract-all
+    body: { "url": "https://hgcloud.to/f/{id}" }  (بدون suffix جودة)
+
+    يستخرج MP4 لكل الجودات المتاحة بالتوازي:
+      1. يفحص الجودات المتاحة عبر /qualities
+      2. يستخرج MP4 لكل جودة بالتوازي (Playwright)
+      3. يُعيد كل الروابط مع الحجم والصلاحية
+
+    الاستجابة:
+      { ok, fileId, qualities: [{quality, label, mp4Url, size, expiresAt, ok}], count }
+    """
+    try:
+        body = await request.json()
+        url = body.get('url')
+        if not url:
+            return web.json_response(
+                {'ok': False, 'error': 'Missing "url" in body'},
+                status=400,
+                headers={'Access-Control-Allow-Origin': '*'}
+            )
+
+        # استخرج fileId
+        file_id, _ = extract_file_id_and_quality(url)
+        if not file_id:
+            return web.json_response(
+                {'ok': False, 'error': f'Could not extract fileId from: {url}'},
+                status=400,
+                headers={'Access-Control-Allow-Origin': '*'}
+            )
+
+        # 1. افحص الجودات المتاحة
+        available = await get_available_qualities(file_id)
+
+        if not available:
+            return web.json_response(
+                {'ok': False, 'error': f'No available qualities for fileId={file_id}'},
+                status=404,
+                headers={'Access-Control-Allow-Origin': '*'}
+            )
+
+        # 2. استخرج MP4 لكل جودة بالتوازي
+        async def extract_one(quality_info):
+            q = quality_info['quality']
+            target_url = f'https://hgcloud.to/f/{file_id}_{q}'
+            try:
+                mp4_url = None
+                for domain in ['hgcloud.to'] + PLAYER_DOMAINS:
+                    try_url = f'https://{domain}/f/{file_id}_{q}'
+                    try:
+                        mp4_url = await extract_mp4_playwright(try_url, q)
+                        if mp4_url:
+                            break
+                    except:
+                        continue
+
+                if mp4_url:
+                    return {
+                        'quality': q,
+                        'label': QUALITY_LABELS.get(q, q),
+                        'mp4Url': mp4_url,
+                        'size': quality_info.get('size'),
+                        'expiresAt': parse_mp4_expiry(mp4_url),
+                        'ok': True,
+                    }
+                else:
+                    return {
+                        'quality': q,
+                        'label': QUALITY_LABELS.get(q, q),
+                        'mp4Url': None,
+                        'size': quality_info.get('size'),
+                        'expiresAt': None,
+                        'ok': False,
+                        'error': 'extraction failed',
+                    }
+            except Exception as e:
+                return {
+                    'quality': q,
+                    'label': QUALITY_LABELS.get(q, q),
+                    'mp4Url': None,
+                    'size': quality_info.get('size'),
+                    'expiresAt': None,
+                    'ok': False,
+                    'error': str(e),
+                }
+
+        # شغّل كل الاستخراجات بالتوازي
+        tasks = [extract_one(qi) for qi in available]
+        results = await asyncio.gather(*tasks)
+
+        # 3. فلتر الناجحة
+        valid = [r for r in results if r['ok']]
+
+        return web.json_response({
+            'ok': True,
+            'fileId': file_id,
+            'qualities': results,
+            'validCount': len(valid),
+            'totalCount': len(results),
+        }, headers={'Access-Control-Allow-Origin': '*'})
+
+    except Exception as e:
+        return web.json_response(
+            {'ok': False, 'error': str(e)},
+            status=500,
+            headers={'Access-Control-Allow-Origin': '*'}
+        )
+
+
 def main():
     app = web.Application()
     app.router.add_post('/extract', handle_extract)
+    app.router.add_post('/extract-all', handle_extract_all)
     app.router.add_get('/qualities', handle_qualities)
     app.router.add_get('/proxy', handle_proxy)
     app.router.add_get('/health', handle_health)

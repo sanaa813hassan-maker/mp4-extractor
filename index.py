@@ -345,6 +345,18 @@ async def handle_proxy(request: web_request.Request):
                 'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Content-Type',
                 'Cache-Control': 'public, max-age=86400',
             }
+
+            # وضع التحميل: أضف Content-Disposition: attachment
+            download_mode = request.query.get('download')
+            if download_mode:
+                # استخرج اسم الملف من الـ URL
+                import os
+                url_path = target_url.split('?')[0]
+                filename = os.path.basename(url_path) or 'video.mp4'
+                # فكّ الترميز إذا كان URL-encoded
+                from urllib.parse import unquote
+                filename = unquote(filename)
+                resp_headers['Content-Disposition'] = f'attachment; filename="{filename}"'
             for h in ['content-type', 'content-length', 'content-range', 'accept-ranges']:
                 v = upstream.headers.get(h)
                 if v:
@@ -358,7 +370,7 @@ async def handle_proxy(request: web_request.Request):
             await stream_response.prepare(request)
 
             # اقرأ الـ upstream chunk-by-chunk وابثه
-            async for chunk in upstream.content.iter_chunked(64 * 1024):  # 64KB chunks
+            async for chunk in upstream.content.iter_chunked(256 * 1024):  # 256KB chunks for speed
                 await stream_response.write(chunk)
 
             await stream_response.write_eof()

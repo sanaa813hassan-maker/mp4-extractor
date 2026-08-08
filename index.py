@@ -30,17 +30,28 @@ PLAYER_DOMAINS = ['hanerix.com', 'audinifer.com', 'dohaxe.com', 'vibuxer.com']
 
 # الجودات المدعومة بالترتيب من الأعلى للأقل
 QUALITIES = ['x', 'h', 'n', 'l']  # 4K, FullHD, HD, Normal
-QUALITY_LABELS = {'x': '4K', 'h': 'FullHD', 'n': 'HD', 'l': 'Normal'}
+QUALITY_LABELS = {'x': '4K ed', 'h': 'FullHD ed', 'n': 'HD ed', 'l': 'Normal ed'}
 
 
 def extract_file_id_and_quality(url: str):
-    """استخرج fileId والجودة من الرابط"""
-    # Patterns: /f/{id}_x, /{id}_x, /f/{id}, /{id}
+    """استخرج fileId والجودة من الرابط
+
+    يدعم عدة صيغ:
+      /f/{id}_x, /f/{id}, /{id}_x, /{id}
+      /f/{id}_x.html, /{id}_x.html
+      vibuxer.com/{id}, vibuxer.com/f/{id}
+    """
     # Quality suffixes: x=4K, h=FullHD, n=HD, l=Normal
-    m = re.search(r'/f?/([A-Za-z0-9]{8,20})(?:_([xhnl]))?(?:[/?#]|$)', url)
-    if not m:
-        return None, None
-    return m.group(1), m.group(2) or 'x'  # default to 4K (x)
+    # Try multiple patterns
+    patterns = [
+        r'/f?/([A-Za-z0-9]{6,20})(?:_([xhnl]))?(?:\.html)?(?:[/?#]|$)',
+        r'/([A-Za-z0-9]{6,20})(?:_([xhnl]))?(?:\.html)?(?:[/?#]|$)',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, url)
+        if m:
+            return m.group(1), m.group(2) or 'x'
+    return None, None
 
 
 async def check_quality_available(file_id: str, quality: str, domain: str = 'hanerix.com'):

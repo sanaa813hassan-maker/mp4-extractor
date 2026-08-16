@@ -18,8 +18,23 @@ import asyncio
 import json
 import os
 import re
-from aiohttp import web, web_request
+from aiohttp import web
+from typing import Any
 from playwright.async_api import async_playwright
+
+# Request type for type hints (compatible with all aiohttp versions)
+try:
+    from aiohttp.web_request import Request as RequestType
+except ImportError:
+    try:
+        from aiohttp import web_request
+        RequestType = Request
+    except ImportError:
+        # Fallback: use BaseRequest from aiohttp
+        from aiohttp.web_request import BaseRequest as RequestType
+
+# Use RequestType for type hints (allows runtime to work even if import fails)
+Request = RequestType
 
 PORT = int(os.environ.get('PORT', '3040'))
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
@@ -173,7 +188,7 @@ async def extract_mp4_playwright(target_url: str, quality: str = 'x'):
             await browser.close()
 
 
-async def handle_qualities(request: web_request.Request):
+async def handle_qualities(request: Request):
     """GET /qualities?id={fileId} — تحقق من كل الجودات المتاحة"""
     try:
         file_id = request.query.get('id')
@@ -203,7 +218,7 @@ async def handle_qualities(request: web_request.Request):
         )
 
 
-async def handle_extract(request: web_request.Request):
+async def handle_extract(request: Request):
     """POST /extract — body: {"url": "https://hgcloud.to/f/{id}_{quality}"}"""
     try:
         body = await request.json()
@@ -304,7 +319,7 @@ def sanitize_filename(name: str) -> str:
     return name
 
 
-async def handle_proxy(request: web_request.Request):
+async def handle_proxy(request: Request):
     """
     GET /proxy?url={mp4_url}&filename={custom_name}&download=1
     HEAD /proxy?url={mp4_url}&filename={custom_name}
@@ -445,7 +460,7 @@ async def handle_proxy(request: web_request.Request):
         )
 
 
-async def handle_extract_all(request: web_request.Request):
+async def handle_extract_all(request: Request):
     """
     POST /extract-all
     body: { "url": "https://hgcloud.to/f/{id}" }  (بدون suffix جودة)

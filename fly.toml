@@ -16,6 +16,16 @@ primary_region = 'cdg'
   min_machines_running = 1
   processes = ['app']
 
+  # Smoke check config - give Playwright more time to start
+  [http_service.http_check]
+    interval = "30s"
+    grace_period = "120s"
+    method = "GET"
+    path = "/health"
+    protocol = "http"
+    timeout = "10s"
+    tls_skip_verify = false
+
   [http_service.concurrency]
     type = "requests"
     hard_limit = 100
@@ -26,3 +36,5 @@ primary_region = 'cdg'
   cpu_kind = 'shared'
   cpus = 4
   memory_mb = 8192
+
+

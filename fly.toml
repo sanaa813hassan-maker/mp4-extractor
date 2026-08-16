@@ -28,16 +28,17 @@ primary_region = 'cdg'
 
   [http_service.concurrency]
     type = "requests"
-    hard_limit = 100
-    soft_limit = 50
+    hard_limit = 5   # ✨ قليل — Chromium بياخد memory كبيرة
+    soft_limit = 2   # ✨ soft limit قليل عشان ما يفتحش كذا browser في نفس الوقت
 
-# ✨ حجم صغير — 1GB RAM + 1 shared CPU (كافي جداً لـ aiohttp + Playwright lazy)
-# لو حملت قبل كده 8GB أو 128GB، Fly.io بيرفض بسبب "insufficient memory available"
+# ✨ 2GB RAM — Chromium بياخد 500-800MB، محتاجين buffer
+# 1GB كان بيـ OOM crash لأن Chromium + Python + aiohttp مع بعض بيعدوا 1GB
+# 2GB يدي مساحة كافية بدون مشاكل
 [[vm]]
-  memory = '1gb'
+  memory = '2gb'
   cpu_kind = 'shared'
   cpus = 1
-  memory_mb = 1024
+  memory_mb = 2048
 
 
 

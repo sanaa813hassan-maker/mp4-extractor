@@ -145,22 +145,67 @@ def parse_mp4_expiry(mp4_url: str):
 
 
 async def extract_mp4_playwright(target_url: str, quality: str = 'x'):
-    """شغّل Playwright لاستخراج رابط MP4"""
+    """شغّل Playwright لاستخراج رابط MP4 — نسخة مستقرة لـ Fly.io"""
     async with _get_async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']
+            args=[
+                # ✨ flags تقلل memory (مهم لـ Fly.io shared hosts)
+                '--no-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-gpu',
+                '--disable-extensions',
+                '--disable-background-networking',
+                '--disable-background-timer-throttling',
+                '--disable-renderer-backgrounding',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-sync',
+                '--disable-default-apps',
+                '--disable-translate',
+                '--disable-features=TranslateUI',
+                '--disable-component-extensions-with-background-pages',
+                '--disable-ipc-flooding-protection',
+                '--disable-renderer-backgrounding',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-features=site-per-process,IsolateOrigins,site-isolation-trial-opt-out',
+                '--no-zygote',              # يقلل processes
+                # ✨ ملحوظة: --single-process ممكن يسبب crash مع Playwright، فمش بنستخدمه
+                '--memory-pressure-off',    # ما يقللش الأداء بسبب memory pressure
+                '--disable-features=LazyLoad',
+                '--disable-features=NetworkService',
+                # الـ proxy و autofill وغيره - مش محتاجينهم
+                '--disable-popup-blocking',
+                '--disable-prompt-on-repost',
+                '--disable-hang-monitor',
+                '--metrics-recording-only',
+                '--no-first-run',
+                '--password-store=basic',
+                '--use-mock-keychain',
+            ],
         )
         context = await browser.new_context(
             user_agent=UA,
             viewport={'width': 1280, 'height': 800},
             locale='en-US',
+            # ✨ block resources مش محتاجينها (يقلل memory + يسرع)
+            ignore_https_errors=True,
         )
+
+        # ✨ block images/fonts/css — بياخدوا memory + bandwidth
+        async def block_resources(route):
+            if route.request.resource_type in ['image', 'font', 'media', 'stylesheet']:
+                await route.abort()
+            else:
+                await route.continue_()
+        await context.route('**/*', block_resources)
+
         page = await context.new_page()
 
         try:
-            await page.goto(target_url, wait_until='networkidle', timeout=20000)
-            await page.wait_for_timeout(1500)
+            # ✨ domcontentloaded أسرع من networkidle (مهم — networkidle بيسبب timeouts)
+            await page.goto(target_url, wait_until='domcontentloaded', timeout=15000)
+            await page.wait_for_timeout(1000)
 
             # Click the download button (g-recaptcha)
             clicked = False
@@ -180,7 +225,7 @@ async def extract_mp4_playwright(target_url: str, quality: str = 'x'):
                 raise Exception('Could not find/click the download button')
 
             # Wait for countdown (5 seconds) + MP4 link to appear
-            await page.wait_for_timeout(7000)
+            await page.wait_for_timeout(6000)
 
             # Extract MP4 URL
             mp4_url = await page.evaluate("""() => {
@@ -190,14 +235,25 @@ async def extract_mp4_playwright(target_url: str, quality: str = 'x'):
             }""")
 
             if not mp4_url:
-                # Debug: get page content
                 content = await page.content()
                 raise Exception(f'No MP4 URL found after countdown. Page size: {len(content)}')
 
             return mp4_url
 
         finally:
-            await browser.close()
+            # ✨ cleanup محكم — page → context → browser بالترتيب
+            try:
+                await page.close()
+            except:
+                pass
+            try:
+                await context.close()
+            except:
+                pass
+            try:
+                await browser.close()
+            except:
+                pass
 
 
 async def handle_qualities(request: Request):
@@ -472,6 +528,56 @@ async def handle_proxy(request: Request):
         )
 
 
+# ✨ extract_one كـ function مستقلة (مش nested) — أسهل في الـ debugging
+async def extract_one(quality_info):
+    """استخرج MP4 لجودة واحدة — بيفتح browser، يستخرج، ويقفل"""
+    q = quality_info['quality']
+    try:
+        mp4_url = None
+        for domain in ['hgcloud.to'] + PLAYER_DOMAINS:
+            try_url = f'https://{domain}/f/{file_id_global}_{q}'
+            try:
+                mp4_url = await extract_mp4_playwright(try_url, q)
+                if mp4_url:
+                    break
+            except:
+                continue
+
+        if mp4_url:
+            return {
+                'quality': q,
+                'label': QUALITY_LABELS.get(q, q),
+                'mp4Url': mp4_url,
+                'size': quality_info.get('size'),
+                'expiresAt': parse_mp4_expiry(mp4_url),
+                'ok': True,
+            }
+        else:
+            return {
+                'quality': q,
+                'label': QUALITY_LABELS.get(q, q),
+                'mp4Url': None,
+                'size': quality_info.get('size'),
+                'expiresAt': None,
+                'ok': False,
+                'error': 'extraction failed',
+            }
+    except Exception as e:
+        return {
+            'quality': q,
+            'label': QUALITY_LABELS.get(q, q),
+            'mp4Url': None,
+            'size': quality_info.get('size'),
+            'expiresAt': None,
+            'ok': False,
+            'error': str(e),
+        }
+
+
+# متغير عام عشان extract_one يقدر يوصل لـ file_id (مش حلو بس شغال)
+file_id_global = ''
+
+
 async def handle_extract_all(request: Request):
     """
     POST /extract-all
@@ -514,57 +620,32 @@ async def handle_extract_all(request: Request):
                 headers={'Access-Control-Allow-Origin': '*'}
             )
 
-        # 2. استخرج MP4 لكل جودة بالتوازي
-        async def extract_one(quality_info):
-            q = quality_info['quality']
-            target_url = f'https://hgcloud.to/f/{file_id}_{q}'
-            try:
-                mp4_url = None
-                for domain in ['hgcloud.to'] + PLAYER_DOMAINS:
-                    try_url = f'https://{domain}/f/{file_id}_{q}'
-                    try:
-                        mp4_url = await extract_mp4_playwright(try_url, q)
-                        if mp4_url:
-                            break
-                    except:
-                        continue
+        # ✨ عيّن file_id_global عشان extract_one يقدر يوصل له
+        global file_id_global
+        file_id_global = file_id
 
-                if mp4_url:
-                    return {
-                        'quality': q,
-                        'label': QUALITY_LABELS.get(q, q),
-                        'mp4Url': mp4_url,
-                        'size': quality_info.get('size'),
-                        'expiresAt': parse_mp4_expiry(mp4_url),
-                        'ok': True,
-                    }
-                else:
-                    return {
-                        'quality': q,
-                        'label': QUALITY_LABELS.get(q, q),
-                        'mp4Url': None,
-                        'size': quality_info.get('size'),
-                        'expiresAt': None,
-                        'ok': False,
-                        'error': 'extraction failed',
-                    }
+        # 2. ✨ استخرج MP4 لكل جودة SEQUENTIALLY (مش parallel)
+        # قبل كده كنا بنستخدم asyncio.gather(*tasks) وده كان بيفتح
+        # 4 instances من Chromium في نفس الوقت → 2GB+ memory → OOM crash
+        # دلوقتي بنستخرج واحد ورا التاني — أبطأ شوية بس مستقر
+        results = []
+        for qi in available:
+            try:
+                r = await extract_one(qi)
+                results.append(r)
             except Exception as e:
-                return {
-                    'quality': q,
-                    'label': QUALITY_LABELS.get(q, q),
+                results.append({
+                    'quality': qi.get('quality', '?'),
+                    'label': QUALITY_LABELS.get(qi.get('quality', ''), qi.get('quality', '')),
                     'mp4Url': None,
-                    'size': quality_info.get('size'),
+                    'size': qi.get('size'),
                     'expiresAt': None,
                     'ok': False,
                     'error': str(e),
-                }
-
-        # شغّل كل الاستخراجات بالتوازي
-        tasks = [extract_one(qi) for qi in available]
-        results = await asyncio.gather(*tasks)
+                })
 
         # 3. فلتر الناجحة
-        valid = [r for r in results if r['ok']]
+        valid = [r for r in results if r.get('ok')]
 
         return web.json_response({
             'ok': True,

@@ -344,6 +344,8 @@ async def handle_proxy(request: web_request.Request):
 
     # لو الطلب HEAD (المتصفح بيتحقق من الـ metadata قبل التحميل)
     if request.method == 'HEAD':
+        from urllib.parse import quote as url_quote_head
+        ascii_fn = filename.encode('ascii', 'replace').decode('ascii').replace('?', '_')
         return web.Response(
             status=200,
             headers={
@@ -353,9 +355,8 @@ async def handle_proxy(request: web_request.Request):
                 'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Content-Type, Content-Disposition',
                 'Accept-Ranges': 'bytes',
                 'Content-Type': 'video/mp4',
-                'Content-Disposition': f"attachment; filename=\"{filename}\"; filename*=UTF-8''{unquote(filename)}",
+                'Content-Disposition': f"attachment; filename=\"{ascii_fn}\"; filename*=UTF-8''{url_quote_head(filename)}",
                 'Cache-Control': 'no-cache',
-                'X-Proxy-Filename': filename,
             }
         )
 
@@ -404,15 +405,11 @@ async def handle_proxy(request: web_request.Request):
                 'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Content-Type, Content-Disposition',
                 # ✨ Accept-Ranges: bytes دائماً عشان المتصفح يدعم seek
                 'Accept-Ranges': 'bytes',
-                # ✨ Content-Disposition بصيغة RFC 5987 (filename*) + filename احتياطي
+                # ✨ Content-Disposition بصيغة RFC 5987 (filename*) + filename احتياطي ASCII
                 'Content-Disposition': f"attachment; filename=\"{ascii_filename}\"; filename*=UTF-8''{url_quote(filename)}",
                 # ✨ Cache-Control: no-cache عشان ما يعملش loop مع cached responses
                 'Cache-Control': 'no-cache, no-store, must-revalidate',
-                # ✨ Connection: close عشان ما يفضلش يحاول يعمل keep-alive
-                'Connection': 'close',
                 'Content-Type': 'video/mp4',
-                # ✨ X-Proxy-Filename للـ debug
-                'X-Proxy-Filename': filename,
             }
 
             # مرّر content-range و content-length من الـ upstream (مهم جداً للـ Range requests)

@@ -663,17 +663,311 @@ async def handle_extract_all(request: Request):
         )
 
 
+# ─── /videasy endpoint ───────────────────────────────────────────────────────
+# Extracts ALL streams (every server/source) from a videasy player page.
+#
+# POST /videasy  { url: "https://player.videasy.net/movie/299534" }
+#    → { ok: true, title, sources: [{name, quality, url}], subtitles, source_count }
+#
+# videasy uses obfuscated JWPlayer with encrypted API responses from
+# api.wingsdatabase.com. We use Playwright + stealth to load the page,
+# let JWPlayer initialize, and capture ALL streams via:
+#   1. JWPlayer's getSources() API (labelled, multi-quality)
+#   2. Network m3u8/mp4 requests (every CDN)
+#   3. JWPlayer's getTracks() for subtitles
+
+VIDEASY_INIT_JS = r"""
+window.__captured = [];
+window.__sources = [];
+window.__subtitles = [];
+
+const origFetch = window.fetch;
+window.fetch = function() {
+  try {
+    const a = arguments;
+    let u = typeof a[0] === 'string' ? a[0] : (a[0] && a[0].url) || '';
+    if (u && /m3u8|mp4|hls|playlist|\.ts($|\?)|manifest|video|stream|source|file|quality|wingsdatabase|ironbubble|moon\.|yoru|neon|sage|jett|breach|vyse|killjoy|fade|omen|raze/i.test(u))
+      window.__captured.push({type:'fetch', url:u, t:Date.now()});
+  } catch(e) {}
+  return origFetch.apply(this, arguments);
+};
+const origOpen = XMLHttpRequest.prototype.open;
+XMLHttpRequest.prototype.open = function(m, u) {
+  try {
+    if (typeof u === 'string' && /m3u8|mp4|hls|playlist|\.ts($|\?)|manifest|video|stream|source|file|quality|wingsdatabase|ironbubble|moon\.|yoru|neon|sage|jett|breach|vyse|killjoy|fade|omen|raze/i.test(u))
+      window.__captured.push({type:'xhr', method:m, url:u, t:Date.now()});
+  } catch(e) {}
+  return origOpen.apply(this, arguments);
+};
+
+// Hook JWPlayer — poll for player instance and get sources + tracks
+function hookJW() {
+  if (window.jwplayer) {
+    let attempts = 0;
+    const iv = setInterval(function() {
+      try {
+        const p = window.jwplayer();
+        if (p && p.getSources) {
+          const srcs = p.getSources();
+          if (srcs && srcs.length) {
+            srcs.forEach(function(s) {
+              if (s.file) {
+                window.__sources.push({
+                  file: s.file,
+                  label: s.label || s.quality || 'unknown',
+                  type: s.type || ''
+                });
+              }
+            });
+          }
+          const tracks = p.getTracks ? p.getTracks() : [];
+          if (tracks && tracks.length) {
+            tracks.forEach(function(t) {
+              if (t.file && (t.kind === 'captions' || t.kind === 'subtitles')) {
+                window.__subtitles.push({
+                  lang: t.label || t.language || 'Unknown',
+                  url: t.file
+                });
+              }
+            });
+          }
+          clearInterval(iv);
+        }
+      } catch(e) {}
+      attempts++;
+      if (attempts > 40) clearInterval(iv);
+    }, 250);
+  }
+}
+hookJW();
+setTimeout(hookJW, 1500);
+setTimeout(hookJW, 3000);
+setTimeout(hookJW, 5000);
+console.clear = function(){};
+'videasy hooks installed';
+"""
+
+
+async def extract_videasy(url):
+    """Open videasy page, capture ALL streams (every server/source)."""
+    async with _get_async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                '--no-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-gpu',
+                '--disable-extensions',
+                '--disable-background-networking',
+                '--disable-background-timer-throttling',
+                '--disable-renderer-backgrounding',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-sync',
+                '--disable-default-apps',
+                '--disable-translate',
+                '--disable-features=TranslateUI',
+                '--disable-component-extensions-with-background-pages',
+                '--disable-ipc-flooding-protection',
+                '--disable-features=site-per-process,IsolateOrigins,site-isolation-trial-opt-out',
+                '--no-zygote',
+                '--memory-pressure-off',
+                '--disable-features=LazyLoad',
+                '--disable-popup-blocking',
+                '--disable-prompt-on-repost',
+                '--disable-hang-monitor',
+                '--metrics-recording-only',
+                '--no-first-run',
+                '--password-store=basic',
+                '--use-mock-keychain',
+            ],
+        )
+        context = await browser.new_context(
+            user_agent=UA,
+            viewport={'width': 1280, 'height': 800},
+            locale='en-US',
+            ignore_https_errors=True,
+        )
+        await context.add_init_script(VIDEASY_INIT_JS)
+        await context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); window.chrome = { runtime: {} };"
+        )
+
+        # block images/fonts/css (memory + bandwidth savings)
+        async def block_resources(route):
+            if route.request.resource_type in ['image', 'font', 'media', 'stylesheet']:
+                await route.abort()
+            else:
+                await route.continue_()
+        await context.route('**/*', block_resources)
+
+        page = await context.new_page()
+
+        captured_urls = []
+        def on_request(req):
+            u = req.url
+            ul = u.lower()
+            if any(k in ul for k in ['.m3u8', '.mp4', 'playlist', 'stream', '/source', 'file', 'quality', 'wingsdatabase', 'ironbubble', 'moon.', 'yoru', 'neon', 'sage', 'jett', 'breach', 'vyse', 'killjoy', 'fade', 'omen', 'raze']):
+                captured_urls.append(u)
+        page.on('request', on_request)
+
+        try:
+            await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+        except Exception as e:
+            try: await page.close()
+            except: pass
+            try: await context.close()
+            except: pass
+            try: await browser.close()
+            except: pass
+            return {'ok': False, 'error': f'goto failed: {str(e)}'}
+
+        # Wait for page + JWPlayer to init
+        await page.wait_for_timeout(8000)
+
+        # Try clicking play
+        try:
+            await page.evaluate("""() => {
+                const selectors = [
+                    '.jw-icon-playback', '.jw-display-icon-playback',
+                    '[aria-label="Play"]', '[aria-label="play"]',
+                    'video', '#player', '.vjs-big-play-button', 'button[data-play]'
+                ];
+                for (const sel of selectors) {
+                    const el = document.querySelector(sel);
+                    if (el) { el.click(); return 'clicked ' + sel; }
+                }
+                const v = document.querySelector('video');
+                if (v) { v.play(); return 'video.play()'; }
+                return 'no play btn';
+            }""")
+        except Exception:
+            pass
+
+        # Wait for sources to be captured
+        await page.wait_for_timeout(7000)
+
+        # Get captured data
+        try: js_captured = await page.evaluate("() => window.__captured || []")
+        except Exception: js_captured = []
+        try: js_sources = await page.evaluate("() => window.__sources || []")
+        except Exception: js_sources = []
+        try: js_subtitles = await page.evaluate("() => window.__subtitles || []")
+        except Exception: js_subtitles = []
+
+        try:
+            title = await page.title()
+            title = title.split(' - ')[0].split(' | ')[0].strip()
+        except Exception:
+            title = 'Unknown'
+
+        # ✨ cleanup محكم — page → context → browser
+        try: await page.close()
+        except: pass
+        try: await context.close()
+        except: pass
+        try: await browser.close()
+        except: pass
+
+        # Combine all captured URLs
+        all_urls = []
+        seen = set()
+        for c in js_captured:
+            u = c.get('url') if isinstance(c, dict) else None
+            if u and u not in seen and not u.startswith('blob:'):
+                seen.add(u)
+                all_urls.append(u)
+        for u in captured_urls:
+            if u not in seen and not u.startswith('blob:'):
+                seen.add(u)
+                all_urls.append(u)
+
+        # Filter to actual stream URLs
+        stream_urls = [u for u in all_urls if '.m3u8' in u.lower() or '.mp4' in u.lower()]
+
+        # Build sources: JWPlayer sources first (labelled), then captured
+        sources = []
+        seen_src = set()
+
+        for s in js_sources:
+            f = s.get('file') if isinstance(s, dict) else None
+            if f and f.startswith('http') and f not in seen_src:
+                seen_src.add(f)
+                sources.append({
+                    'name': 'Videasy',
+                    'quality': s.get('label', 'unknown'),
+                    'url': f,
+                    'type': s.get('type', ''),
+                })
+
+        for u in stream_urls:
+            if u not in seen_src:
+                seen_src.add(u)
+                q = 'unknown'
+                ul = u.lower()
+                if '4k' in ul or '2160' in ul: q = '4K'
+                elif '1080' in ul: q = '1080p'
+                elif '720' in ul: q = '720p'
+                elif '480' in ul: q = '480p'
+                elif '360' in ul: q = '360p'
+                sources.append({
+                    'name': 'Videasy',
+                    'quality': q,
+                    'url': u,
+                    'type': 'm3u8' if '.m3u8' in ul else 'mp4',
+                })
+
+        # Deduplicate subtitles
+        subtitles = []
+        seen_sub = set()
+        for s in js_subtitles:
+            u = s.get('url') if isinstance(s, dict) else None
+            if u and u not in seen_sub:
+                seen_sub.add(u)
+                subtitles.append({
+                    'lang': s.get('lang', 'Unknown'),
+                    'url': u,
+                })
+
+        return {
+            'ok': True,
+            'title': title,
+            'sources': sources,
+            'subtitles': subtitles,
+            'source_count': len(sources),
+            'subtitle_count': len(subtitles),
+        }
+
+
+async def handle_videasy(request):
+    """POST /videasy — body: {url: videasy URL}"""
+    try:
+        body = await request.json()
+        url = body.get('url')
+        if not url:
+            return web.json_response({'ok': False, 'error': 'missing url'}, status=400)
+    except Exception as e:
+        return web.json_response({'ok': False, 'error': f'invalid JSON: {e}'}, status=400)
+
+    try:
+        result = await extract_videasy(url)
+        return web.json_response(result, headers={'Access-Control-Allow-Origin': '*'})
+    except Exception as e:
+        return web.json_response({'ok': False, 'error': str(e)}, status=500)
+
+
 def main():
     app = web.Application()
     app.router.add_post('/extract', handle_extract)
     app.router.add_post('/extract-all', handle_extract_all)
+    app.router.add_post('/videasy', handle_videasy)  # ✨ NEW: videasy extraction
     app.router.add_get('/qualities', handle_qualities)
     # ✨ proxy يدعم GET و HEAD (مهم للمتصفح لما يتحقق من الملف قبل التحميل)
     app.router.add_get('/proxy', handle_proxy)
     app.router.add_head('/proxy', handle_proxy)
     app.router.add_get('/health', handle_health)
     app.router.add_route('OPTIONS', '/{tail:.*}', handle_options)
-    print(f'MP4 extractor listening on :{PORT}')
+    print(f'MP4 extractor + videasy listening on :{PORT}')
     web.run_app(app, host='0.0.0.0', port=PORT, access_log=None)
 
 

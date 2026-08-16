@@ -19,8 +19,6 @@ import json
 import os
 import re
 from aiohttp import web
-from typing import Any
-from playwright.async_api import async_playwright
 
 # Request type for type hints (compatible with all aiohttp versions)
 try:
@@ -28,13 +26,27 @@ try:
 except ImportError:
     try:
         from aiohttp import web_request
-        RequestType = Request
+        RequestType = web_request.Request
     except ImportError:
         # Fallback: use BaseRequest from aiohttp
         from aiohttp.web_request import BaseRequest as RequestType
 
 # Use RequestType for type hints (allows runtime to work even if import fails)
 Request = RequestType
+
+# ✨ LAZY IMPORT: Playwright بيتـ import هنا بس لما نحتاجه
+# ده بيخلي التطبيق يبدأ بسرعة (أقل من 1 ثانية)
+# قبل كده كان Playwright بيتـ import عند الـ startup وده بيـ import
+# كل الـ Chromium internals (بياخد 5-10 ثواني)
+_async_playwright = None
+
+def _get_async_playwright():
+    """Lazy load Playwright فقط عند الحاجة (لو فيه طلب extract)"""
+    global _async_playwright
+    if _async_playwright is None:
+        from playwright.async_api import async_playwright as _ap
+        _async_playwright = _ap
+    return _async_playwright
 
 PORT = int(os.environ.get('PORT', '3040'))
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
@@ -134,7 +146,7 @@ def parse_mp4_expiry(mp4_url: str):
 
 async def extract_mp4_playwright(target_url: str, quality: str = 'x'):
     """شغّل Playwright لاستخراج رابط MP4"""
-    async with async_playwright() as p:
+    async with _get_async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
             args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']

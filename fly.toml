@@ -18,11 +18,11 @@ primary_region = 'cdg'
 
   [http_service.concurrency]
     type = "requests"
-    hard_limit = 25
-    soft_limit = 10
+    hard_limit = 100
+    soft_limit = 50
 
 [[vm]]
-  memory = '2gb'
+  memory = '8gb'
   cpu_kind = 'shared'
-  cpus = 1
-  memory_mb = 2048
+  cpus = 4
+  memory_mb = 8192

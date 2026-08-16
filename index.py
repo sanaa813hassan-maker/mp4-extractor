@@ -287,25 +287,81 @@ async def handle_options(request):
     })
 
 
+def sanitize_filename(name: str) -> str:
+    """نظّف اسم الملف من الرموز غير المسموحة واجعله آمناً لنظام الملفات"""
+    from urllib.parse import unquote
+    name = unquote(name).strip()
+    # شيل أي رموز مش filepath-safe (محتفظين بالمسافات والنقاط والشرطات)
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', name)
+    # شيل المسافات الزيادة
+    name = re.sub(r'\s+', '.', name)
+    # حدّد الطول
+    if len(name) > 200:
+        name = name[:200]
+    # تأكد إنه ينتهي بـ .mp4
+    if not name.lower().endswith('.mp4'):
+        name = name + '.mp4'
+    return name
+
+
 async def handle_proxy(request: web_request.Request):
     """
-    GET /proxy?url={mp4_url}
+    GET /proxy?url={mp4_url}&filename={custom_name}&download=1
+    HEAD /proxy?url={mp4_url}&filename={custom_name}
 
     يبث ملف MP4 من premilkyway.com عبر Fly.io.
     ضروري لأن premilkyway.com يربط الـ token بالـ IP:
     - الـ token وُلّد على Fly.io → يعمل فقط من Fly.io IP
     - هذا الـ proxy يجلب الـ MP4 من Fly.io ويعيد بثه للمتصفح
+
+    المعاملات:
+      url       (مطلوب) - رابط MP4 الكامل من الـ upstream
+      filename  (مطلوب) - اسم ملف مخصص للتحميل (بدون .mp4، يُضاف تلقائياً)
+      download  (اختياري) - أي قيمة = وضع التحميل (attachment)
+      ref       (اختياري) - Referer مخصص
+
+    اسم الملف لازم يمر عبر filename parameter.
+    لو مش موجود، بيستخدم "video.mp4" كاسم افتراضي (مش اسم الـ URL العشوائي).
     """
     import aiohttp
+    import os
+    from urllib.parse import unquote
+
     target_url = request.query.get('url')
     if not target_url:
         return web.json_response({'ok': False, 'error': 'Missing "url" parameter'}, status=400)
 
+    # اسم الملف: من filename parameter فقط، ولا video.mp4
+    # ✨ مهم: لا نستخدم اسم الـ URL العشوائي أبداً
+    custom_filename = request.query.get('filename')
+    if custom_filename:
+        filename = sanitize_filename(custom_filename)
+    else:
+        # اسم عام بدلاً من اسم الـ URL العشوائي
+        filename = 'video.mp4'
+        # سجل تحذير لو في debug
+        print(f'[proxy] WARNING: no filename parameter, using default "video.mp4" for url={target_url[:80]}')
+
+    # لو الطلب HEAD (المتصفح بيتحقق من الـ metadata قبل التحميل)
+    if request.method == 'HEAD':
+        return web.Response(
+            status=200,
+            headers={
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+                'Access-Control-Allow-Headers': 'Range',
+                'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Content-Type, Content-Disposition',
+                'Accept-Ranges': 'bytes',
+                'Content-Type': 'video/mp4',
+                'Content-Disposition': f"attachment; filename=\"{filename}\"; filename*=UTF-8''{unquote(filename)}",
+                'Cache-Control': 'no-cache',
+                'X-Proxy-Filename': filename,
+            }
+        )
+
     try:
-        # لا نستخدم 'async with' للـ session حتى نتمكن من بث الـ response
         session = aiohttp.ClientSession()
         try:
-            # مرّر Range header إذا موجود (لدعم seek)
             headers = {'User-Agent': UA}
 
             # أضف Referer/Origin تلقائياً حسب الـ CDN
@@ -338,26 +394,29 @@ async def handle_proxy(request: web_request.Request):
                 )
 
             # مرّر الـ headers المهمة
+            # ✨ Content-Disposition بصيغة RFC 5987 لدعم أي رمز
+            from urllib.parse import quote as url_quote
+            ascii_filename = filename.encode('ascii', 'replace').decode('ascii').replace('?', '_')
             resp_headers = {
                 'Access-Control-Allow-Origin': '*',
                 'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
                 'Access-Control-Allow-Headers': 'Range',
-                'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Content-Type',
-                'Cache-Control': 'public, max-age=86400',
+                'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Content-Type, Content-Disposition',
+                # ✨ Accept-Ranges: bytes دائماً عشان المتصفح يدعم seek
+                'Accept-Ranges': 'bytes',
+                # ✨ Content-Disposition بصيغة RFC 5987 (filename*) + filename احتياطي
+                'Content-Disposition': f"attachment; filename=\"{ascii_filename}\"; filename*=UTF-8''{url_quote(filename)}",
+                # ✨ Cache-Control: no-cache عشان ما يعملش loop مع cached responses
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                # ✨ Connection: close عشان ما يفضلش يحاول يعمل keep-alive
+                'Connection': 'close',
+                'Content-Type': 'video/mp4',
+                # ✨ X-Proxy-Filename للـ debug
+                'X-Proxy-Filename': filename,
             }
 
-            # وضع التحميل: أضف Content-Disposition: attachment
-            download_mode = request.query.get('download')
-            if download_mode:
-                # استخرج اسم الملف من الـ URL
-                import os
-                url_path = target_url.split('?')[0]
-                filename = os.path.basename(url_path) or 'video.mp4'
-                # فكّ الترميز إذا كان URL-encoded
-                from urllib.parse import unquote
-                filename = unquote(filename)
-                resp_headers['Content-Disposition'] = f'attachment; filename="{filename}"'
-            for h in ['content-type', 'content-length', 'content-range', 'accept-ranges']:
+            # مرّر content-range و content-length من الـ upstream (مهم جداً للـ Range requests)
+            for h in ['content-length', 'content-range']:
                 v = upstream.headers.get(h)
                 if v:
                     resp_headers[h] = v
@@ -370,7 +429,7 @@ async def handle_proxy(request: web_request.Request):
             await stream_response.prepare(request)
 
             # اقرأ الـ upstream chunk-by-chunk وابثه
-            async for chunk in upstream.content.iter_chunked(256 * 1024):  # 256KB chunks for speed
+            async for chunk in upstream.content.iter_chunked(256 * 1024):  # 256KB chunks
                 await stream_response.write(chunk)
 
             await stream_response.write_eof()
@@ -504,7 +563,9 @@ def main():
     app.router.add_post('/extract', handle_extract)
     app.router.add_post('/extract-all', handle_extract_all)
     app.router.add_get('/qualities', handle_qualities)
+    # ✨ proxy يدعم GET و HEAD (مهم للمتصفح لما يتحقق من الملف قبل التحميل)
     app.router.add_get('/proxy', handle_proxy)
+    app.router.add_head('/proxy', handle_proxy)
     app.router.add_get('/health', handle_health)
     app.router.add_route('OPTIONS', '/{tail:.*}', handle_options)
     print(f'MP4 extractor listening on :{PORT}')

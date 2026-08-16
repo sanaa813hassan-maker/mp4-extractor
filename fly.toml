@@ -1,7 +1,11 @@
-# fly.toml app configuration file generated for mp4-extractor on 2026-08-07T04:54:07Z
+# fly.toml — mp4-extractor (proxy-only v2.0)
 #
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+# ✨ النسخة دي proxy فقط (مفيهاش Playwright) — مستقرة جداً على Fly.io
+# - 256MB RAM (كافي جداً لـ aiohttp + proxy)
+# - 1 shared CPU
+# - hard_limit=100 (proxy خفيف، يقدر يخدم كتير)
 #
+# الـ extract و videasy اتنقلوا لـ Vercel باستخدام @sparticuz/chromium
 
 app = 'mp4-extractor'
 primary_region = 'cdg'
@@ -16,10 +20,9 @@ primary_region = 'cdg'
   min_machines_running = 1
   processes = ['app']
 
-  # Smoke check config - give Playwright more time to start
   [http_service.http_check]
     interval = "30s"
-    grace_period = "120s"
+    grace_period = "30s"
     method = "GET"
     path = "/health"
     protocol = "http"
@@ -28,17 +31,12 @@ primary_region = 'cdg'
 
   [http_service.concurrency]
     type = "requests"
-    hard_limit = 5   # ✨ قليل — Chromium بياخد memory كبيرة
-    soft_limit = 2   # ✨ soft limit قليل عشان ما يفتحش كذا browser في نفس الوقت
+    hard_limit = 100
+    soft_limit = 50
 
-# ✨ 2GB RAM — Chromium بياخد 500-800MB، محتاجين buffer
-# 1GB كان بيـ OOM crash لأن Chromium + Python + aiohttp مع بعض بيعدوا 1GB
-# 2GB يدي مساحة كافية بدون مشاكل
+# ✨ 256MB — aiohttp + proxy بيشغلوا على 30-50MB بس
 [[vm]]
-  memory = '2gb'
+  memory = '256mb'
   cpu_kind = 'shared'
   cpus = 1
-  memory_mb = 2048
-
-
-
+  memory_mb = 256

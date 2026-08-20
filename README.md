@@ -1,27 +1,31 @@
-# MP4 Extractor
+# MP4 Extractor + Vidfast Extractor
 
-Microservice لاستخراج روابط MP4 المباشرة من hgcloud.to/vibuxer.com/hanerix.com
-يدعم جودات: 4K, FullHD, HD, Normal
+Microservice for extracting video sources from multiple sites.
 
 ## Endpoints
 
 ### GET /health
 Health check.
 
-### GET /qualities?id={fileId}
-يفحص الجودات المتاحة لملف معين (سريع، بدون Playwright).
+### GET /proxy?url={mp4_url}&filename={custom_name}&ref={referer}
+Proxy MP4/m3u8 from CDNs with proper Referer/Origin headers.
 
-### POST /extract
-body: `{"url": "https://hgcloud.to/f/{id}_{quality}", "fallback": true}`
-يستخرج رابط MP4 مباشر باستخدام Playwright (reCAPTCHA v3 تُحل تلقائياً).
+### POST /vidfast
+body: `{"url": "https://vidfast.vc/movie/1265609"}`
 
-## النشر على Fly.io
+Extracts m3u8/mp4 URLs from vidfast.vc using Playwright + stealth.
+Tries Chromium first, then Firefox as fallback.
 
-1. اذهب إلى https://fly.io/dashboard
-2. New App → اختر هذا الـ repo
-3. Fly.io سيكتشف Dockerfile تلقائياً
-4. انتظر النشر (~2-3 دقائق)
+### POST /vidfast-cookies
+body: `{"url": "https://vidfast.vc/movie/1265609"}`
 
-## متغيرات البيئة
+Lighter extraction using curl_cffi (Chrome impersonation).
+Bypasses Cloudflare but cannot execute JavaScript.
+Returns the page's RSC data (en token, title, etc.).
 
-- `PORT` — البورت (Fly.io يضبطه تلقائياً، افتراضي 8080)
+## Deployment on Fly.io
+
+1. `fly deploy` (or push to GitHub and connect the repo)
+2. The Dockerfile uses `mcr.microsoft.com/playwright/python` which has Chromium pre-installed
+3. Needs at least 1GB RAM for Chromium
+4. `auto_stop_machines = 'stop'` — saves cost when idle
